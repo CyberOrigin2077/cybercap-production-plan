@@ -1,0 +1,3 @@
+.credentials*
+*.local
+node_modules/

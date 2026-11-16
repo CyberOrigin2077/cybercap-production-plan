@@ -1,3 +1,4 @@
+import {rememberSession,readSession,clearSession} from './session.js?v=1';
 const $=s=>document.querySelector(s), enc=new TextEncoder(), dec=new TextDecoder();
 const STORE='cyberorigin-plan-v1', STATUSES=['未开始','进行中','待验收','已完成'], STAGES=['设计','小批量','生产'];
 const titles={portfolio:'三项目总览',daily:'每日排产',overview:'项目总览',schedule:'排期与甘特图',tasks:'模块计划',materials:'物料清单',batches:'生产交付',risks:'风险与问题'};
@@ -25,8 +26,40 @@ function syncProject(){if(!workspace||!state)return;const i=workspace.projects.f
 function selectProject(id,go='tasks'){syncProject();state=workspace.projects.find(p=>p.id===id)||workspace.projects[0];target=state.targets.at(-1)??state.targetQty;filters={search:'',stage:'全部阶段',status:'全部状态'};view=go;render()}
 function persist(){syncProject();workspace.updatedAt=new Date().toISOString();const snapshot=structuredClone(workspace),k=key,meta={...envelope},activeSession=session;$('#save-status').textContent='正在保存…';saveQueue=saveQueue.catch(()=>{}).then(async()=>{const blob=await encrypt(snapshot,k,meta);if(activeSession!==session)return;localStorage.setItem(STORE,JSON.stringify(blob));envelope=blob;$('#save-status').textContent='已加密保存至本机'}).catch(()=>{$('#save-status').textContent='保存失败，请导出备份';toast('本机存储不可用，请立即导出备份')});return saveQueue}
 $('#show-password').onclick=()=>{const input=$('[name="password"]');input.type=input.type==='password'?'text':'password';$('#show-password').textContent=input.type==='password'?'显示':'隐藏'};
-$('#login-form').onsubmit=async e=>{e.preventDefault();const button=$('#login-submit');button.disabled=true;$('#login-error').textContent='';try{if(!crypto.subtle)throw Error('请通过HTTPS或localhost访问网站');const f=new FormData(e.target),username=f.get('username').trim(),password=f.get('password');const response=await fetch('vault.json',{cache:'no-store'});if(!response.ok)throw Error('计划载入失败，请刷新重试');const serverBlob=await response.json();let serverKey,seed;try{serverKey=await derive(username,password,serverBlob);seed=validateWorkspace(await decrypt(serverBlob,serverKey))}catch{throw Error('账号或密码错误')};let data=seed;const local=localStorage.getItem(STORE);if(local){try{const oldBlob=JSON.parse(local);data=migrateWorkspace(await unlockStored(oldBlob,serverKey,serverBlob),seed)}catch{throw Error('本机保存数据无法读取，请先保留本机备份，再联系管理员处理')}}key=serverKey;envelope=serverBlob;latestSeed=seed;workspace=migrateWorkspace(data,seed);state=workspace.projects[0];target=state.targets.at(-1)??state.targetQty;view='portfolio';session++;$('#login').hidden=true;$('#workspace').hidden=false;e.target.reset();render();await persist();toast('已进入三项目排产工作台')}catch(err){$('#login-error').textContent=err.message}finally{button.disabled=false}};
-$('#logout').onclick=async()=>{await saveQueue;session++;state=null;workspace=null;latestSeed=null;key=null;envelope=null;$('#workspace').hidden=true;$('#login').hidden=false;$('#content').replaceChildren();view='portfolio';toast('已退出登录')};
+async function loadVault(){const response=await fetch('vault.json',{cache:'no-store'});if(!response.ok)throw Error('计划载入失败，请刷新重试');return response.json()}
+async function enterWorkspace(serverBlob,serverKey,seed){
+ let data=seed;const local=localStorage.getItem(STORE);
+ if(local){try{data=migrateWorkspace(await unlockStored(JSON.parse(local),serverKey,serverBlob),seed)}catch{throw Error('本机保存数据无法读取，请先保留本机备份，再联系管理员处理')}}
+ const next=migrateWorkspace(data,seed);
+ key=serverKey;envelope=serverBlob;latestSeed=seed;workspace=next;state=workspace.projects[0];target=state.targets.at(-1)??state.targetQty;view='portfolio';session++;
+ $('#login').hidden=true;$('#workspace').hidden=false;$('#login-form').reset();render();await persist();
+}
+$('#login-form').onsubmit=async e=>{e.preventDefault();const button=$('#login-submit');button.disabled=true;$('#login-error').textContent='';try{
+ if(!crypto.subtle)throw Error('请通过HTTPS或localhost访问网站');
+ const f=new FormData(e.target),username=f.get('username').trim(),password=f.get('password'),serverBlob=await loadVault();let serverKey,seed;
+ try{serverKey=await derive(username,password,serverBlob);seed=validateWorkspace(await decrypt(serverBlob,serverKey))}catch{throw Error('账号或密码错误')}
+ await enterWorkspace(serverBlob,serverKey,seed);
+ try{await rememberSession(serverKey,serverBlob.salt)}catch{toast('已登录；浏览器会话存储不可用，刷新后需重新登录');return}
+ toast('已进入三项目排产工作台');
+ }catch(err){$('#login-error').textContent=err.message}finally{button.disabled=false}};
+$('#logout').onclick=async()=>{
+ await saveQueue;
+ try{await clearSession()}catch{ /* The tab marker is removed before key cleanup. */ }
+ session++;state=null;workspace=null;latestSeed=null;key=null;envelope=null;$('#workspace').hidden=true;$('#login').hidden=false;$('#content').replaceChildren();document.body.classList.remove('portfolio-screen');view='portfolio';toast('已退出登录');
+};
+async function restoreSession(){
+ const button=$('#login-submit');button.disabled=true;$('#login').hidden=true;
+ try{
+  const saved=await readSession();if(!saved)return;
+  const serverBlob=await loadVault();
+  if(saved.salt!==serverBlob.salt){await clearSession();return}
+  const seed=validateWorkspace(await decrypt(serverBlob,saved.key));
+  await enterWorkspace(serverBlob,saved.key,seed);
+ }catch(error){
+  // Keep the session for a later reload when loading the vault fails temporarily.
+  $('#login-error').textContent='会话恢复失败，请刷新重试或重新登录';
+ }finally{button.disabled=false;$('#login').hidden=!!state}
+}
 $('#nav').onclick=e=>{const b=e.target.closest('[data-view]');if(b){view=b.dataset.view;render()}};
 function heading(title,subtitle,action=''){return `<div class="page-heading"><div><span class="eyebrow">CYBERORIGIN / PRODUCTION</span><h1>${title}</h1><p>${subtitle}</p></div><div class="heading-actions">${action}</div></div>`}
 const addButton=(type,label)=>`<button class="primary" data-add="${type}">＋ ${label}</button>`;
@@ -67,3 +100,5 @@ $('#editor-form').onsubmit=async e=>{e.preventDefault();if(!editing)return;const
 $('#delete-record').onclick=async()=>{const {type,id}=editing;if(type==='tasks'&&state.tasks.some(t=>t.deps.includes(id))){$('#editor-error').textContent='该任务仍被其他任务依赖，请先调整后续任务';return}if(!confirm('确定删除这条记录？'))return;state[type]=state[type].filter(x=>x.id!==id);state.updatedAt=new Date().toISOString();closeEditor();render();await persist();toast('记录已删除')};
 $('#export').onclick=async()=>{try{await saveQueue;syncProject();const blob=await encrypt(workspace,key,envelope);const url=URL.createObjectURL(new Blob([JSON.stringify(blob)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=`cyberorigin-plan-${today()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('已导出加密备份，使用相同账号密码导入')}catch{toast('导出失败，请重试')}};
 $('#import').onclick=()=>$('#import-file').click();$('#import-file').onchange=async e=>{const file=e.target.files[0];if(!file)return;try{if(file.size>10000000)throw Error('备份文件过大');const blob=JSON.parse(await file.text());if(blob.iterations!==envelope.iterations)throw Error('备份格式不支持');const next=migrateWorkspace(await unlockStored(blob,key,envelope),latestSeed);if(!confirm('导入将替换当前浏览器中的计划，建议先导出备份。继续？'))return;workspace=next;state=workspace.projects.find(p=>p.id===state.id)||workspace.projects[0];target=state.targets.at(-1)??state.targetQty;render();await persist();toast('三项目备份已导入')}catch(err){toast(err.message||'导入失败，请核对备份文件')}finally{e.target.value=''}};
+
+void restoreSession();
